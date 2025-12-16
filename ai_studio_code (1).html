@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Jensen Cal - AI Calorie Tracker</title>
+    
+    <!-- 1. PWA Manifest (通常作为独立文件 manifest.json，此处为注释块提供配置) -->
+
+    {
+      "name": "Jensen Cal",
+      "short_name": "JensenCal",
+      "start_url": ".",
+      "display": "standalone",
+      "background_color": "#0f172a",
+      "theme_color": "#06b6d4",
+      "icons": [
+        { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+        { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+      ]
+    }
+ 
+
+    <!-- 2. Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'tech-dark': '#0f172a', // Slate 900
+                        'tech-panel': 'rgba(30, 41, 59, 0.7)', // Slate 800 with opacity
+                        'neon-cyan': '#06b6d4', // Cyan 500
+                        'neon-green': '#84cc16', // Lime 500
+                        'neon-pink': '#ec4899', // Pink 500
+                    },
+                    fontFamily: {
+                        sans: ['Rajdhani', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- 3. Fonts: Rajdhani for Tech look -->
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- 4. React & ReactDOM & Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- 5. Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- 6. Google Gemini SDK (Import Map for Module usage) -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@google/generative-ai": "https://esm.run/@google/generative-ai"
+        }
+      }
+    </script>
+
+    <style>
+        /* 全局样式覆盖 */
+        body {
+            background-color: #0f172a;
+            color: white;
+            font-family: 'Rajdhani', sans-serif;
+            overflow-x: hidden;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* Glassmorphism 工具类 */
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(6, 182, 212, 0.3);
+        }
+        /* 隐藏滚动条但保留功能 */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Main Application Logic -->
+    <script type="text/babel" data-type="module">
+        import { GoogleGenerativeAI } from "@google/generative-ai";
+
+        // --- Constants & Utilities ---
+        const MEAL_TYPES = ['早餐', '午餐', '晚餐', '加餐'];
+        const GOAL_TYPES = [
+            { id: 'lose', label: '减肥 (Lose Weight)' },
+            { id: 'gain', label: '增肌 (Muscle Gain)' },
+            { id: 'maintain', label: '保持 (Maintain)' }
+        ];
+
+        // 获取当前日期字符串 (YYYY-MM-DD)
+        const getTodayStr = () => new Date().toISOString().split('T')[0];
+
+        // --- Components ---
+
+        // 图标组件封装 (使用 Lucide)
+        const Icon = ({ name, size = 24, className = "" }) => {
+            React.useEffect(() => {
+                lucide.createIcons();
+            }, [name]);
+            return <i data-lucide={name} width={size} height={size} className={className}></i>;
+        };
+
+        // 进度条组件
+        const ProgressBar = ({ label, value, colorClass, unit }) => (
+            <div className="mb-2">
+                <div className="flex justify-between text-xs mb-1 text-gray-300">
+                    <span>{label}</span>
+                    <span>{value}{unit}</span>
+                </div>
+                <div className="h-2 w-full bg-gray-700 rounded-full overflow-hidden">
+                    <div className={`h-full ${colorClass}`} style={{ width: '60%' /* Mock width for visual, ideally calculated */ }}></div>
+                </div>
+            </div>
+        );
+
+        // 主应用组件
+        const App = () => {
+            // --- State ---
+            const [apiKey, setApiKey] = React.useState(localStorage.getItem('jensen_gemini_key') || '');
+            const [userGoals, setUserGoals] = React.useState(JSON.parse(localStorage.getItem('jensen_goals')) || {
+                targetCalories: 2000,
+                goalType: 'maintain'
+            });
+            const [history, setHistory] = React.useState(JSON.parse(localStorage.getItem('jensen_history')) || []);
+            const [hasSeenOnboarding, setHasSeenOnboarding] = React.useState(localStorage.getItem('jensen_onboarding') === 'true');
+            
+            // UI States
+            const [view, setView] = React.useState('camera'); // camera, history, settings
+            const [isAnalyzing, setIsAnalyzing] = React.useState(false);
+            const [showResult, setShowResult] = React.useState(false);
+            const [currentAnalysis, setCurrentAnalysis] = React.useState(null);
+            const [currentImage, setCurrentImage] = React.useState(null); // Base64
+            const [toast, setToast] = React.useState(null);
+            const [dailyAnalysisResult, setDailyAnalysisResult] = React.useState(null);
+            const [isSelectMode, setIsSelectMode] = React.useState(false);
+            const [selectedItems, setSelectedItems] = React.useState([]);
+
+            // Refs
+            const fileInputRef = React.useRef(null);
+
+            // --- Effects ---
+            React.useEffect(() => {
+                localStorage.setItem('jensen_history', JSON.stringify(history));
+            }, [history]);
+
+            React.useEffect(() => {
+                lucide.createIcons();
+            }, [view, showResult, dailyAnalysisResult]);
+
+            // --- Gemini Logic ---
+            const analyzeFoodImage = async (base64Image) => {
+                if (!apiKey) {
+                    showToast("请先在设置中配置 Gemini API Key", "error");
+                    return;
+                }
+
+                setIsAnalyzing(true);
+                try {
+                    const genAI = new GoogleGenerativeAI(apiKey);
+                    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+                    // 去掉 data:image/jpeg;base64, 前缀
+                    const base64Data = base64Image.split(',')[1];
+
+                    const prompt = `Analyze this image. Identify the food items. Return a JSON object with fields: foodName (string), calories (integer, estimated total), protein (string, e.g., '20g'), carbs (string), fat (string), explanation (short sentence, max 15 words). Do not use Markdown formatting (no \`\`\`json blocks), just return the raw JSON string.`;
+
+                    const imagePart = {
+                        inlineData: {
+                            data: base64Data,
+                            mimeType: "image/jpeg",
+                        },
+                    };
+
+                    const result = await model.generateContent([prompt, imagePart]);
+                    const response = await result.response;
+                    let text = response.text();
+
+                    // 清理可能的 Markdown 格式
+                    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+                    
+                    const data = JSON.parse(text);
+                    setCurrentAnalysis(data);
+                    setShowResult(true);
+
+                } catch (error) {
+                    console.error("Gemini API Error:", error);
+                    showToast("识别失败: " + error.message, "error");
+                } finally {
+                    setIsAnalyzing(false);
+                }
+            };
+
+            const analyzeDailyDiet = async (dayRecords) => {
+                if (!apiKey) return;
+                setIsAnalyzing(true);
+                try {
+                    const genAI = new GoogleGenerativeAI(apiKey);
+                    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+                    const summary = dayRecords.map(r => 
+                        `${r.mealType}: ${r.foodName} (${r.calories}kcal, P:${r.macros.protein}, C:${r.macros.carbs}, F:${r.macros.fat})`
+                    ).join('\n');
+
+                    const prompt = `
+                    Users Goal: ${userGoals.goalType}, Daily Target: ${userGoals.targetCalories}kcal.
+                    Today's Intake:
+                    ${summary}
+                    
+                    Analyze this day's diet. Return a JSON object with:
+                    1. totalCalories (int)
+                    2. status (string, e.g., "Under Target", "On Target", "Over Target")
+                    3. advice (string, 2 sentences suggesting improvements based on the goal)
+                    4. score (integer 1-100)
+                    Do not use Markdown. Raw JSON only.
+                    `;
+
+                    const result = await model.generateContent(prompt);
+                    let text = result.response.text();
+                    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+                    
+                    setDailyAnalysisResult(JSON.parse(text));
+                } catch (e) {
+                    showToast("分析失败，请重试", "error");
+                } finally {
+                    setIsAnalyzing(false);
+                }
+            };
+
+            // --- Handlers ---
+            const handleFileChange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        const base64 = reader.result;
+                        setCurrentImage(base64);
+                        analyzeFoodImage(base64);
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const saveRecord = (mealType) => {
+                if (!currentAnalysis) return;
+                const newRecord = {
+                    id: Date.now(),
+                    date: getTodayStr(),
+                    mealType,
+                    foodName: currentAnalysis.foodName,
+                    calories: currentAnalysis.calories,
+                    macros: {
+                        protein: currentAnalysis.protein,
+                        carbs: currentAnalysis.carbs,
+                        fat: currentAnalysis.fat
+                    },
+                    explanation: currentAnalysis.explanation,
+                    // 不保存图片 Base64 以节省 LocalStorage，仅在识别时展示
+                };
+
+                setHistory(prev => [newRecord, ...prev]);
+                showToast("记录已保存！", "success");
+                closeResult();
+            };
+
+            const closeResult = () => {
+                setShowResult(false);
+                setCurrentAnalysis(null);
+                setCurrentImage(null);
+                // 强制刷新 Input value 允许重复上传同一张图
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            const showToast = (msg, type = 'info') => {
+                setToast({ msg, type });
+                setTimeout(() => setToast(null), 3000);
+            };
+
+            const handleDeleteSelected = () => {
+                const newHistory = history.filter(item => !selectedItems.includes(item.id));
+                setHistory(newHistory);
+                setSelectedItems([]);
+                setIsSelectMode(false);
+                showToast("已删除选中记录", "success");
+            };
+
+            // --- Helpers for History ---
+            const groupedHistory = history.reduce((acc, item) => {
+                if (!acc[item.date]) acc[item.date] = [];
+                acc[item.date].push(item);
+                return acc;
+            }, {});
+
+            // Sort order: Breakfast, Lunch, Dinner, Snack
+            const sortMeals = (items) => {
+                const order = { '早餐': 1, '午餐': 2, '晚餐': 3, '加餐': 4 };
+                return items.sort((a, b) => order[a.mealType] - order[b.mealType]);
+            };
+
+            const checkDailyComplete = (dateStr) => {
+                const daysItems = groupedHistory[dateStr] || [];
+                const types = daysItems.map(i => i.mealType);
+                return types.includes('早餐') && types.includes('午餐') && types.includes('晚餐');
+            };
+
+            // --- Render Components ---
+
+            // 1. Onboarding
+            if (!hasSeenOnboarding) {
+                return (
+                    <div className="fixed inset-0 bg-tech-dark z-50 flex flex-col items-center justify-center p-6 text-center">
+                        <div className="w-24 h-24 bg-neon-cyan rounded-full flex items-center justify-center mb-6 shadow-[0_0_20px_rgba(6,182,212,0.5)]">
+                            <Icon name="scan-line" size={48} className="text-white" />
+                        </div>
+                        <h1 className="text-4xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-r from-neon-cyan to-neon-green">Jensen Cal</h1>
+                        <p className="text-gray-400 mb-8">AI 驱动的智能卡路里识别与管理助手。</p>
+                        
+                        <div className="space-y-4 text-left w-full max-w-xs mb-8 text-sm">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-gray-800 rounded-lg text-neon-cyan"><Icon name="camera" size={20}/></div>
+                                <span>拍照一键识别食物热量</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-gray-800 rounded-lg text-neon-green"><Icon name="target" size={20}/></div>
+                                <span>设定增肌/减脂目标</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-gray-800 rounded-lg text-neon-pink"><Icon name="brain-circuit" size={20}/></div>
+                                <span>AI 生成每日饮食建议</span>
+                            </div>
+                        </div>
+
+                        <button 
+                            onClick={() => {
+                                localStorage.setItem('jensen_onboarding', 'true');
+                                setHasSeenOnboarding(true);
+                                setView('settings'); // Force settings first to set API Key
+                                showToast("请先设置 API Key", "info");
+                            }}
+                            className="w-full max-w-xs py-4 bg-neon-cyan text-black font-bold text-lg rounded-xl hover:bg-cyan-400 transition-colors"
+                        >
+                            开始使用
+                        </button>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen pb-20 relative">
+                    {/* Header */}
+                    <header className="fixed top-0 left-0 right-0 h-16 glass z-30 flex items-center justify-between px-4">
+                        <div className="font-bold text-xl tracking-wider text-neon-cyan">JENSEN CAL</div>
+                        <div className="flex gap-4">
+                            {view === 'history' && (
+                                <button onClick={() => {
+                                    setIsSelectMode(!isSelectMode);
+                                    setSelectedItems([]);
+                                }}>
+                                    <Icon name={isSelectMode ? "x-square" : "check-square"} className={isSelectMode ? "text-neon-pink" : "text-white"} />
+                                </button>
+                            )}
+                            <button onClick={() => setView('settings')}>
+                                <Icon name="settings" className="text-white hover:text-neon-cyan transition" />
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Views */}
+                    <main className="pt-20 px-4">
+                        
+                        {/* CAMERA VIEW */}
+                        {view === 'camera' && (
+                            <div className="flex flex-col items-center justify-center h-[70vh] relative">
+                                <div className="absolute inset-0 border-2 border-neon-cyan/30 rounded-3xl m-4 pointer-events-none">
+                                    <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-neon-cyan rounded-tl-xl"></div>
+                                    <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-neon-cyan rounded-tr-xl"></div>
+                                    <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-neon-cyan rounded-bl-xl"></div>
+                                    <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-neon-cyan rounded-br-xl"></div>
+                                </div>
+                                <div className="text-center space-y-4 z-10">
+                                    <div className="text-gray-400 animate-pulse">
+                                        <Icon name="camera" size={64} className="mx-auto mb-4 opacity-50" />
+                                        <p>点击下方按钮拍摄食物</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* HISTORY VIEW */}
+                        {view === 'history' && (
+                            <div className="space-y-6">
+                                {Object.keys(groupedHistory).length === 0 && (
+                                    <div className="text-center text-gray-500 mt-20">暂无记录</div>
+                                )}
+                                {Object.keys(groupedHistory).sort().reverse().map(date => {
+                                    const items = sortMeals(groupedHistory[date]);
+                                    const totalCals = items.reduce((sum, i) => sum + i.calories, 0);
+                                    const isToday = date === getTodayStr();
+                                    const canAnalyze = isToday && checkDailyComplete(date);
+
+                                    return (
+                                        <div key={date} className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700">
+                                            <div className="flex justify-between items-end mb-4 border-b border-slate-700 pb-2">
+                                                <div>
+                                                    <h3 className="text-lg font-bold text-neon-cyan">{date}</h3>
+                                                    <p className="text-xs text-gray-400">摄入: {totalCals} / {userGoals.targetCalories} kcal</p>
+                                                </div>
+                                                {canAnalyze && (
+                                                    <button 
+                                                        onClick={() => analyzeDailyDiet(items)}
+                                                        className="text-xs bg-neon-green/20 text-neon-green px-3 py-1 rounded-full border border-neon-green/50 flex items-center gap-1"
+                                                    >
+                                                        <Icon name="sparkles" size={12} /> 分析今日
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="space-y-3">
+                                                {items.map(item => (
+                                                    <div 
+                                                        key={item.id} 
+                                                        className={`flex items-center gap-3 bg-slate-900 p-3 rounded-xl border ${isSelectMode && selectedItems.includes(item.id) ? 'border-neon-pink' : 'border-transparent'}`}
+                                                        onClick={() => {
+                                                            if (isSelectMode) {
+                                                                if (selectedItems.includes(item.id)) {
+                                                                    setSelectedItems(prev => prev.filter(id => id !== item.id));
+                                                                } else {
+                                                                    setSelectedItems(prev => [...prev, item.id]);
+                                                                }
+                                                            } else {
+                                                                // Show details (readonly mode of ResultCard)
+                                                                setCurrentAnalysis({
+                                                                    foodName: item.foodName,
+                                                                    calories: item.calories,
+                                                                    protein: item.macros.protein,
+                                                                    carbs: item.macros.carbs,
+                                                                    fat: item.macros.fat,
+                                                                    explanation: item.explanation
+                                                                });
+                                                                setShowResult(true);
+                                                                // Hack: mark as readonly via state check in ResultCard or just hide buttons
+                                                            }
+                                                        }}
+                                                    >
+                                                        <div className={`w-2 h-full rounded-full ${
+                                                            item.mealType === '早餐' ? 'bg-yellow-400' :
+                                                            item.mealType === '午餐' ? 'bg-orange-500' :
+                                                            item.mealType === '晚餐' ? 'bg-purple-500' : 'bg-blue-400'
+                                                        }`}></div>
+                                                        <div className="flex-1">
+                                                            <div className="flex justify-between">
+                                                                <span className="font-bold">{item.foodName}</span>
+                                                                <span className="text-neon-cyan">{item.calories} kcal</span>
+                                                            </div>
+                                                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                                                <span>{item.mealType}</span>
+                                                                <span>P:{item.macros.protein} C:{item.macros.carbs}</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {/* SETTINGS VIEW */}
+                        {view === 'settings' && (
+                            <div className="space-y-6">
+                                <div className="bg-slate-800 rounded-xl p-4">
+                                    <h3 className="font-bold mb-4 text-neon-cyan">API Configuration</h3>
+                                    <label className="block text-sm text-gray-400 mb-2">Gemini API Key</label>
+                                    <input 
+                                        type="password" 
+                                        value={apiKey}
+                                        onChange={(e) => {
+                                            setApiKey(e.target.value);
+                                            localStorage.setItem('jensen_gemini_key', e.target.value);
+                                        }}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-neon-cyan outline-none"
+                                        placeholder="Enter your key here..."
+                                    />
+                                    <p className="text-xs text-gray-500 mt-2">Key stored locally on your device.</p>
+                                </div>
+
+                                <div className="bg-slate-800 rounded-xl p-4">
+                                    <h3 className="font-bold mb-4 text-neon-cyan">目标设定</h3>
+                                    
+                                    <label className="block text-sm text-gray-400 mb-2">每日卡路里目标</label>
+                                    <input 
+                                        type="number" 
+                                        value={userGoals.targetCalories}
+                                        onChange={(e) => {
+                                            const newGoals = {...userGoals, targetCalories: parseInt(e.target.value)};
+                                            setUserGoals(newGoals);
+                                            localStorage.setItem('jensen_goals', JSON.stringify(newGoals));
+                                        }}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mb-4"
+                                    />
+
+                                    <label className="block text-sm text-gray-400 mb-2">当前阶段</label>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {GOAL_TYPES.map(g => (
+                                            <button 
+                                                key={g.id}
+                                                onClick={() => {
+                                                    const newGoals = {...userGoals, goalType: g.id};
+                                                    setUserGoals(newGoals);
+                                                    localStorage.setItem('jensen_goals', JSON.stringify(newGoals));
+                                                }}
+                                                className={`p-2 rounded-lg text-xs font-bold border ${userGoals.goalType === g.id ? 'bg-neon-cyan text-black border-neon-cyan' : 'bg-slate-900 border-slate-700 text-gray-400'}`}
+                                            >
+                                                {g.label.split(' ')[0]}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="text-center text-gray-600 text-xs mt-10">
+                                    Jensen Cal v1.0.0<br/>Single-File PWA
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Footer Nav / Action Button */}
+                    <nav className="fixed bottom-0 left-0 right-0 h-20 glass-panel z-40 flex justify-around items-center pb-2">
+                        <button 
+                            onClick={() => setView('history')}
+                            className={`flex flex-col items-center gap-1 ${view === 'history' ? 'text-neon-cyan' : 'text-gray-500'}`}
+                        >
+                            <Icon name="calendar" size={24} />
+                            <span className="text-[10px]">历史</span>
+                        </button>
+
+                        {/* Main Camera Button */}
+                        <div className="relative -top-6">
+                            <input 
+                                type="file" 
+                                accept="image/*" 
+                                capture="environment" 
+                                className="hidden" 
+                                ref={fileInputRef}
+                                onChange={handleFileChange}
+                            />
+                            <button 
+                                onClick={() => {
+                                    if (isSelectMode) {
+                                        handleDeleteSelected();
+                                    } else {
+                                        setView('camera');
+                                        fileInputRef.current.click();
+                                    }
+                                }}
+                                className={`w-16 h-16 rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all active:scale-95 ${
+                                    isSelectMode ? 'bg-neon-pink text-white' : 'bg-neon-cyan text-black'
+                                }`}
+                            >
+                                {isAnalyzing ? (
+                                    <Icon name="loader-2" size={32} className="animate-spin" />
+                                ) : isSelectMode ? (
+                                    <Icon name="trash-2" size={32} />
+                                ) : (
+                                    <Icon name="aperture" size={32} />
+                                )}
+                            </button>
+                        </div>
+
+                        <button 
+                            onClick={() => setView('settings')}
+                            className={`flex flex-col items-center gap-1 ${view === 'settings' ? 'text-neon-cyan' : 'text-gray-500'}`}
+                        >
+                            <Icon name="user" size={24} />
+                            <span className="text-[10px]">目标</span>
+                        </button>
+                    </nav>
+
+                    {/* Result Card Modal (Glassmorphism) */}
+                    {showResult && currentAnalysis && (
+                        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+                            <div className="w-full max-w-md bg-slate-900/90 border-t border-neon-cyan/50 rounded-t-3xl p-6 relative animate-in slide-in-from-bottom duration-300 pb-10">
+                                
+                                {/* Handle Bar */}
+                                <div className="w-12 h-1 bg-gray-600 rounded-full mx-auto mb-6"></div>
+
+                                <div className="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-white">{currentAnalysis.foodName}</h2>
+                                        <p className="text-neon-cyan text-lg font-bold">{currentAnalysis.calories} <span className="text-sm text-gray-400">kcal</span></p>
+                                    </div>
+                                    <button onClick={closeResult} className="p-2 bg-slate-800 rounded-full text-gray-400 hover:text-white">
+                                        <Icon name="x" size={20} />
+                                    </button>
+                                </div>
+
+                                <p className="text-gray-400 text-sm mb-6 italic">"{currentAnalysis.explanation}"</p>
+
+                                {/* Macros */}
+                                <div className="grid grid-cols-3 gap-4 mb-6">
+                                    <div className="bg-slate-800 p-3 rounded-xl text-center border border-slate-700">
+                                        <div className="text-xs text-gray-400 mb-1">Protein</div>
+                                        <div className="font-bold text-neon-cyan">{currentAnalysis.protein}</div>
+                                    </div>
+                                    <div className="bg-slate-800 p-3 rounded-xl text-center border border-slate-700">
+                                        <div className="text-xs text-gray-400 mb-1">Carbs</div>
+                                        <div className="font-bold text-neon-green">{currentAnalysis.carbs}</div>
+                                    </div>
+                                    <div className="bg-slate-800 p-3 rounded-xl text-center border border-slate-700">
+                                        <div className="text-xs text-gray-400 mb-1">Fat</div>
+                                        <div className="font-bold text-neon-pink">{currentAnalysis.fat}</div>
+                                    </div>
+                                </div>
+
+                                {/* Actions - Only show if we have an image (meaning it's a new scan, not history view) */}
+                                {currentImage && (
+                                    <>
+                                        <div className="grid grid-cols-4 gap-2 mb-4">
+                                            {MEAL_TYPES.map(type => (
+                                                <button 
+                                                    key={type}
+                                                    onClick={() => saveRecord(type)}
+                                                    className="py-2 rounded-lg text-xs font-bold bg-slate-800 border border-slate-700 hover:border-neon-cyan hover:text-neon-cyan transition"
+                                                >
+                                                    {type}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <p className="text-center text-xs text-gray-500">选择餐点类型以保存</p>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Daily Analysis Modal */}
+                    {dailyAnalysisResult && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in">
+                            <div className="bg-slate-900 border border-neon-green/30 w-full max-w-sm rounded-2xl p-6 relative overflow-hidden">
+                                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-neon-green to-neon-cyan"></div>
+                                <button onClick={() => setDailyAnalysisResult(null)} className="absolute top-4 right-4 text-gray-400"><Icon name="x" size={20}/></button>
+                                
+                                <div className="text-center mb-6">
+                                    <h2 className="text-xl font-bold text-white mb-1">今日饮食分析</h2>
+                                    <div className="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-br from-neon-green to-neon-cyan my-4">
+                                        {dailyAnalysisResult.score}
+                                    </div>
+                                    <div className="inline-block px-3 py-1 rounded-full bg-slate-800 text-xs border border-slate-700 text-neon-green">
+                                        {dailyAnalysisResult.status}
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 mb-4">
+                                    <h4 className="text-neon-cyan font-bold mb-2 flex items-center gap-2"><Icon name="lightbulb" size={16}/> AI 建议</h4>
+                                    <p className="text-sm text-gray-300 leading-relaxed">
+                                        {dailyAnalysisResult.advice}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Toast Notification */}
+                    {toast && (
+                        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-[60] px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-in slide-in-from-top fade-in duration-300 ${
+                            toast.type === 'error' ? 'bg-red-500/90 text-white' : 'bg-neon-cyan/90 text-black font-bold'
+                        }`}>
+                            <Icon name={toast.type === 'error' ? 'alert-circle' : 'check-circle'} size={18} />
+                            <span className="text-sm">{toast.msg}</span>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
